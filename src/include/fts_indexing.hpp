@@ -8,19 +8,17 @@
 
 #pragma once
 
-#include "duckdb/main/client_context.hpp"
-#include "duckdb/function/function.hpp"
+#include "fts_common.hpp"
 
 namespace duckdb {
 
+//! The PRAGMAs of the extension, which expand to the SQL that does the work
 struct FTSIndexing {
-  static string DropFTSIndexQuery(ClientContext &context,
-                                  const FunctionParameters &parameters);
-  static string CreateFTSIndexQuery(ClientContext &context,
-                                    const FunctionParameters &parameters);
+  static string DropFTSIndexQuery(cxx::PragmaFunction::QueryInput &input);
+  static string CreateFTSIndexQuery(cxx::PragmaFunction::QueryInput &input);
   static string
-  CreateFTSBooleanQueryMacrosQuery(ClientContext &context,
-                                   const FunctionParameters &parameters);
+  CreateFTSBooleanQueryMacrosQuery(cxx::PragmaFunction::QueryInput &input);
+  static void Register(cxx::Extension &extension, cxx::Factory &factory);
 };
 
 } // namespace duckdb

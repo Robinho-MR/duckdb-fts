@@ -2,46 +2,43 @@
 
 #include "fts_sql_assets.hpp"
 
-#include "duckdb/common/exception.hpp"
-#include "duckdb/common/sql_identifier.hpp"
-#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
-string GetFTSSchemaName(const QualifiedName &qname) {
-  return StringUtil::Format("fts_%s_%s", qname.Schema().GetIdentifierName(),
-                            qname.Name().GetIdentifierName());
+string GetFTSSchemaName(const FTSTableName &qname) {
+  return Format("fts_%s_%s", qname.Schema(),
+                            qname.Name());
 }
 
-string GetFTSSchema(const QualifiedName &qname) {
+string GetFTSSchema(const FTSTableName &qname) {
   auto result =
-      IsInvalidCatalog(qname.Catalog())
+      qname.Catalog().empty()
           ? string("")
-          : SQLIdentifier::ToString(qname.Catalog().GetIdentifierName()) + ".";
-  result += SQLIdentifier::ToString(GetFTSSchemaName(qname));
+          : QuoteIdentifier(qname.Catalog()) + ".";
+  result += QuoteIdentifier(GetFTSSchemaName(qname));
   return result;
 }
 
-SQLTemplateArgument GetFTSSchemaArgument(const QualifiedName &qname) {
+SQLTemplateArgument GetFTSSchemaArgument(const FTSTableName &qname) {
   vector<string> parts;
-  if (!IsInvalidCatalog(qname.Catalog())) {
-    parts.push_back(qname.Catalog().GetIdentifierName());
+  if (!qname.Catalog().empty()) {
+    parts.push_back(qname.Catalog());
   }
   parts.push_back(GetFTSSchemaName(qname));
   return SQLTemplateArgument::QualifiedIdentifier(parts);
 }
 
-string GetQualifiedTableName(const QualifiedName &qname) {
+string GetQualifiedTableName(const FTSTableName &qname) {
   return GetQualifiedTableArgument(qname).GetSQL();
 }
 
-SQLTemplateArgument GetQualifiedTableArgument(const QualifiedName &qname) {
+SQLTemplateArgument GetQualifiedTableArgument(const FTSTableName &qname) {
   vector<string> parts;
-  if (!IsInvalidCatalog(qname.Catalog())) {
-    parts.push_back(qname.Catalog().GetIdentifierName());
+  if (!qname.Catalog().empty()) {
+    parts.push_back(qname.Catalog());
   }
-  parts.push_back(qname.Schema().GetIdentifierName());
-  parts.push_back(qname.Name().GetIdentifierName());
+  parts.push_back(qname.Schema());
+  parts.push_back(qname.Name());
   return SQLTemplateArgument::QualifiedIdentifier(parts);
 }
 
@@ -63,16 +60,16 @@ AnalyzeTokenStreamProjectionSQL(AnalyzeTokenStreamProjection projection) {
   case AnalyzeTokenStreamProjection::TOKEN_POSITION:
     return ",\n       tokenized.token_position";
   }
-  throw InternalException("Unsupported analyzer token stream projection");
+  Throw<InternalException>("Unsupported analyzer token stream projection");
 }
 
-string RenderAnalyzeTokenStream(const QualifiedName &qname,
+string RenderAnalyzeTokenStream(const FTSTableName &qname,
                                 const FTSAnalyzerConfig &config,
                                 AnalyzeTokenStreamProjection projection) {
   auto term_expression = config.stemmer == "none"
                              ? "tokenized.raw_term"
                              : "stem(tokenized.raw_term, " +
-                                   SQLString::ToString(config.stemmer) + ")";
+                                   QuoteLiteral(config.stemmer) + ")";
   auto stopwords_filter = config.filter_stopwords
                               ? "  AND tokenized.raw_term NOT IN (\n"
                                 "      SELECT sw\n"
@@ -90,7 +87,7 @@ string RenderAnalyzeTokenStream(const QualifiedName &qname,
         SQLTemplateArgument::TrustedSQL(stopwords_filter)}});
 }
 
-string RenderQueryAnalysis(const QualifiedName &qname,
+string RenderQueryAnalysis(const FTSTableName &qname,
                            const FTSAnalyzerConfig &config) {
   auto trailing_stopword =
       config.filter_stopwords
@@ -107,19 +104,19 @@ string RenderQueryAnalysis(const QualifiedName &qname,
         SQLTemplateArgument::TrustedSQL(trailing_stopword)}});
 }
 
-static string GetFTSTriggerPrefix(const QualifiedName &qname,
+static string GetFTSTriggerPrefix(const FTSTableName &qname,
                                   const string &infix) {
-  return StringUtil::Format("__fts_%s_%s_", GetFTSSchemaName(qname), infix);
+  return Format("__fts_%s_%s_", GetFTSSchemaName(qname), infix);
 }
 
-vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSInsertTriggerNames(const FTSTableName &qname,
                                         const string &infix) {
   auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {prefix + "00_docs", prefix + "10_dict_insert", prefix + "20_terms",
           prefix + "30_dict_df", prefix + "40_stats"};
 }
 
-vector<string> GetFTSClusteredInsertTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSClusteredInsertTriggerNames(const FTSTableName &qname,
                                                  const string &infix) {
   auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {prefix + "00_docs", prefix + "10_dict_insert",
@@ -127,21 +124,21 @@ vector<string> GetFTSClusteredInsertTriggerNames(const QualifiedName &qname,
           prefix + "40_stats"};
 }
 
-vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSDeleteTriggerNames(const FTSTableName &qname,
                                         const string &infix) {
   auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {prefix + "00_dict_df", prefix + "10_terms", prefix + "15_stats",
           prefix + "20_docs", prefix + "30_dict_prune"};
 }
 
-vector<string> GetFTSClusteredDeleteTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSClusteredDeleteTriggerNames(const FTSTableName &qname,
                                                  const string &infix) {
   auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {prefix + "00_dict_df", prefix + "10_terms_store", prefix + "15_stats",
           prefix + "20_docs", prefix + "30_dict_prune"};
 }
 
-vector<string> GetFTSLayeredInsertTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSLayeredInsertTriggerNames(const FTSTableName &qname,
                                                const string &infix) {
   auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {prefix + "15_term_stats",    prefix + "16_term_stats_by_len",
@@ -151,7 +148,7 @@ vector<string> GetFTSLayeredInsertTriggerNames(const QualifiedName &qname,
           prefix + "37_raw_dict_df"};
 }
 
-vector<string> GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSLayeredDeleteTriggerNames(const FTSTableName &qname,
                                                const string &infix) {
   auto prefix = GetFTSTriggerPrefix(qname, infix);
   return {
@@ -162,7 +159,7 @@ vector<string> GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname,
       prefix + "27_term_stats_prune"};
 }
 
-vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
+vector<string> GetFTSTriggerNames(const FTSTableName &qname) {
   vector<string> result;
   auto append = [&](vector<string> names) {
     result.insert(result.end(), names.begin(), names.end());
@@ -182,51 +179,51 @@ vector<string> GetFTSTriggerNames(const QualifiedName &qname) {
   return result;
 }
 
-string GetFTSBuildTermsTable(const QualifiedName &qname) {
-  return SQLIdentifier::ToString("__fts_build_terms_" +
+string GetFTSBuildTermsTable(const FTSTableName &qname) {
+  return QuoteIdentifier("__fts_build_terms_" +
                                  GetFTSSchemaName(qname));
 }
 
-string GetFTSBuildDictTable(const QualifiedName &qname) {
-  return SQLIdentifier::ToString("__fts_build_dict_" + GetFTSSchemaName(qname));
+string GetFTSBuildDictTable(const FTSTableName &qname) {
+  return QuoteIdentifier("__fts_build_dict_" + GetFTSSchemaName(qname));
 }
 
 string GetFTSTermsStorageTable() {
-  return SQLIdentifier::ToString("__terms_storage");
+  return QuoteIdentifier("__terms_storage");
 }
 
-string GetFTSBuildRawDictTable(const QualifiedName &qname) {
-  return SQLIdentifier::ToString("__fts_build_raw_dict_" +
+string GetFTSBuildRawDictTable(const FTSTableName &qname) {
+  return QuoteIdentifier("__fts_build_raw_dict_" +
                                  GetFTSSchemaName(qname));
 }
 
-string GetFTSTermStatsTermIndex(const QualifiedName &qname) {
-  return SQLIdentifier::ToString("__fts_" + GetFTSSchemaName(qname) +
+string GetFTSTermStatsTermIndex(const FTSTableName &qname) {
+  return QuoteIdentifier("__fts_" + GetFTSSchemaName(qname) +
                                  "_term_stats_term_idx");
 }
 
-string GetFTSTermGramsGramIndex(const QualifiedName &qname) {
-  return SQLIdentifier::ToString("__fts_" + GetFTSSchemaName(qname) +
+string GetFTSTermGramsGramIndex(const FTSTableName &qname) {
+  return QuoteIdentifier("__fts_" + GetFTSSchemaName(qname) +
                                  "_term_grams_gram_idx");
 }
 
-string GetFTSTermPrefixesPrefixIndex(const QualifiedName &qname) {
-  return SQLIdentifier::ToString("__fts_" + GetFTSSchemaName(qname) +
+string GetFTSTermPrefixesPrefixIndex(const FTSTableName &qname) {
+  return QuoteIdentifier("__fts_" + GetFTSSchemaName(qname) +
                                  "_term_prefixes_prefix_idx");
 }
 
-string GetFTSRawTermGramsGramIndex(const QualifiedName &qname) {
-  return SQLIdentifier::ToString("__fts_" + GetFTSSchemaName(qname) +
+string GetFTSRawTermGramsGramIndex(const FTSTableName &qname) {
+  return QuoteIdentifier("__fts_" + GetFTSSchemaName(qname) +
                                  "_raw_term_grams_gram_idx");
 }
 
 string FieldLengthAggregateList(idx_t field_count) {
   vector<string> field_lengths;
   for (idx_t field_id = 0; field_id < field_count; field_id++) {
-    field_lengths.push_back(StringUtil::Format(
+    field_lengths.push_back(Format(
         "count(*) FILTER (WHERE fieldid = %i)::BIGINT", field_id));
   }
-  return "list_value(" + StringUtil::Join(field_lengths, ", ") + ")";
+  return "list_value(" + Join(field_lengths, ", ") + ")";
 }
 
 string ZeroFieldLengthList(idx_t field_count, const string &type) {
@@ -234,21 +231,21 @@ string ZeroFieldLengthList(idx_t field_count, const string &type) {
   for (idx_t field_id = 0; field_id < field_count; field_id++) {
     field_lengths.push_back("0::" + type);
   }
-  return "list_value(" + StringUtil::Join(field_lengths, ", ") + ")";
+  return "list_value(" + Join(field_lengths, ", ") + ")";
 }
 
 string StatsFieldAggregateList(idx_t field_count, const string &aggregate,
                                const string &fallback, const string &type) {
   vector<string> field_lengths;
   for (idx_t field_id = 0; field_id < field_count; field_id++) {
-    auto expression = StringUtil::Format(
+    auto expression = Format(
         "%s(list_extract(docs.field_lens, %i))", aggregate, field_id + 1);
     if (!fallback.empty()) {
-      expression = StringUtil::Format("coalesce(%s, %s)", expression, fallback);
+      expression = Format("coalesce(%s, %s)", expression, fallback);
     }
     field_lengths.push_back(expression + "::" + type);
   }
-  return "list_value(" + StringUtil::Join(field_lengths, ", ") + ")";
+  return "list_value(" + Join(field_lengths, ", ") + ")";
 }
 
 } // namespace duckdb

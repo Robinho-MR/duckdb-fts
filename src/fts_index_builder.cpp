@@ -5,15 +5,13 @@
 #include "fts_sql_assets.hpp"
 #include "fts_sql_template.hpp"
 
-#include "duckdb/common/sql_identifier.hpp"
-#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
 static constexpr int64_t FTS_INDEX_FORMAT_VERSION = 4;
 static constexpr int64_t FTS_ANALYZER_VERSION = 1;
 
-static string SchemaSetupScript(const QualifiedName &qname) {
+static string SchemaSetupScript(const FTSTableName &qname) {
   return RenderSQLTemplate(fts_sql::SCHEMA_SETUP,
                            {{"fts_schema", GetFTSSchemaArgument(qname)}});
 }
@@ -62,7 +60,7 @@ static string StopwordsScript(const FTSIndexConfig &config) {
        {"stopwords_table", GetQualifiedTableArgument(config.stopwords_table)}});
 }
 
-static string TokenizeMacroScript(const QualifiedName &qname,
+static string TokenizeMacroScript(const FTSTableName &qname,
                                   const string &tokenizer, const string &ignore,
                                   bool strip_accents, bool lower,
                                   bool with_offsets) {
@@ -80,7 +78,7 @@ static string TokenizeMacroScript(const QualifiedName &qname,
        {"lower", SQLTemplateArgument::Boolean(lower)}});
 }
 
-static string HighlightMacrosScript(const QualifiedName &qname,
+static string HighlightMacrosScript(const FTSTableName &qname,
                                     const FTSAnalyzerConfig &config) {
   return RenderSQLTemplate(
       fts_sql::HIGHLIGHT_MACROS,
@@ -89,7 +87,7 @@ static string HighlightMacrosScript(const QualifiedName &qname,
         SQLTemplateArgument::TrustedSQL(RenderQueryAnalysis(qname, config))}});
 }
 
-static string AnalyzeTextMacroScript(const QualifiedName &qname,
+static string AnalyzeTextMacroScript(const FTSTableName &qname,
                                      const FTSAnalyzerConfig &config) {
   return RenderSQLTemplate(
       fts_sql::ANALYZE_TEXT_MACRO,
@@ -99,7 +97,7 @@ static string AnalyzeTextMacroScript(const QualifiedName &qname,
             qname, config, AnalyzeTokenStreamProjection::POSITION_OFFSETS))}});
 }
 
-static string IndexTablesScript(const QualifiedName &qname,
+static string IndexTablesScript(const FTSTableName &qname,
                                 const string &input_id,
                                 const vector<string> &input_values,
                                 const string &build_terms_table,
@@ -110,8 +108,8 @@ static string IndexTablesScript(const QualifiedName &qname,
   vector<string> field_values;
   vector<string> tokenize_fields;
   for (idx_t i = 0; i < input_values.size(); i++) {
-    field_values.push_back(StringUtil::Format(
-        "(%i, %s)", i, SQLString::ToString(input_values[i])));
+    field_values.push_back(Format(
+        "(%i, %s)", i, QuoteLiteral(input_values[i])));
     tokenize_fields.push_back(RenderSQLTemplate(
         layered_search ? fts_sql::TOKENIZE_POSITIONAL_FIELD
                        : fts_sql::TOKENIZE_FIELD,
@@ -155,13 +153,13 @@ static string IndexTablesScript(const QualifiedName &qname,
       fts_sql::INDEX_TABLES,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
        {"field_values",
-        SQLTemplateArgument::TrustedSQL(StringUtil::Join(field_values, ", "))},
+        SQLTemplateArgument::TrustedSQL(Join(field_values, ", "))},
        {"build_terms_table",
         SQLTemplateArgument::TrustedSQL(build_terms_table)},
        {"build_dict_table", SQLTemplateArgument::TrustedSQL(build_dict_table)},
        {"build_raw_dict_table",
         SQLTemplateArgument::TrustedSQL(build_raw_dict_table)},
-       {"union_fields_query", SQLTemplateArgument::TrustedSQL(StringUtil::Join(
+       {"union_fields_query", SQLTemplateArgument::TrustedSQL(Join(
                                   tokenize_fields, " UNION ALL "))},
        {"analyzed_tokens",
         SQLTemplateArgument::TrustedSQL(RenderAnalyzeTokenStream(
@@ -226,7 +224,7 @@ static string IndexMetadataScript(const FTSIndexConfig &config) {
         SQLTemplateArgument::StringLiteral(analyzer_config)}});
 }
 
-static string LayeredSidecarScript(const QualifiedName &qname) {
+static string LayeredSidecarScript(const FTSTableName &qname) {
   return RenderSQLTemplate(
       fts_sql::LAYERED_SIDECARS,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
@@ -241,7 +239,7 @@ static string LayeredSidecarScript(const QualifiedName &qname) {
 }
 
 static string
-FieldScoringValidationCTEs(const QualifiedName &qname,
+FieldScoringValidationCTEs(const FTSTableName &qname,
                            const string &params_name = "params",
                            const string &field_weights_name = "field_weights",
                            const string &field_b_name = "field_b",
@@ -274,7 +272,7 @@ FieldScoringValidationCTEs(const QualifiedName &qname,
         SQLTemplateArgument::TrustedSQL(requested_fields_validation)}});
 }
 
-static string FieldScoringConfigCTEs(const QualifiedName &qname) {
+static string FieldScoringConfigCTEs(const FTSTableName &qname) {
   return RenderSQLTemplate(
       fts_sql::FIELD_SCORING_CONFIG_CTES,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
@@ -282,12 +280,12 @@ static string FieldScoringConfigCTEs(const QualifiedName &qname) {
         SQLTemplateArgument::TrustedSQL(FieldScoringValidationCTEs(qname))}});
 }
 
-static string FieldScoringScoreCTEs(const QualifiedName &qname) {
+static string FieldScoringScoreCTEs(const FTSTableName &qname) {
   return RenderSQLTemplate(fts_sql::FIELD_SCORING_SCORE_CTES,
                            {{"fts_schema", GetFTSSchemaArgument(qname)}});
 }
 
-static string MatchMacroScript(const QualifiedName &qname,
+static string MatchMacroScript(const FTSTableName &qname,
                                const FTSAnalyzerConfig &config) {
   return RenderSQLTemplate(
       fts_sql::MATCH_BM25,
@@ -301,7 +299,7 @@ static string MatchMacroScript(const QualifiedName &qname,
         SQLTemplateArgument::TrustedSQL(FieldScoringScoreCTEs(qname))}});
 }
 
-static string LayeredSearchTableMacroScript(const QualifiedName &qname,
+static string LayeredSearchTableMacroScript(const FTSTableName &qname,
                                             const FTSAnalyzerConfig &config) {
   return RenderSQLTemplate(
       fts_sql::SEARCH_LAYERED_BM25,
@@ -314,7 +312,7 @@ static string LayeredSearchTableMacroScript(const QualifiedName &qname,
         SQLTemplateArgument::TrustedSQL(FieldScoringScoreCTEs(qname))}});
 }
 
-static string LayeredPatternTableMacroScript(const QualifiedName &qname) {
+static string LayeredPatternTableMacroScript(const FTSTableName &qname) {
   return RenderSQLTemplate(
       fts_sql::SEARCH_LAYERED_PATTERN,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
@@ -322,18 +320,18 @@ static string LayeredPatternTableMacroScript(const QualifiedName &qname) {
         SQLTemplateArgument::TrustedSQL(FieldScoringConfigCTEs(qname))}});
 }
 
-static string LayeredSearchDispatchMacroScript(const QualifiedName &qname) {
+static string LayeredSearchDispatchMacroScript(const FTSTableName &qname) {
   return RenderSQLTemplate(fts_sql::SEARCH_LAYERED_BM25_DISPATCH,
                            {{"fts_schema", GetFTSSchemaArgument(qname)}});
 }
 
-static string LayeredMatchMacroScript(const QualifiedName &qname) {
+static string LayeredMatchMacroScript(const FTSTableName &qname) {
   return RenderSQLTemplate(fts_sql::MATCH_LAYERED_BM25,
                            {{"fts_schema", GetFTSSchemaArgument(qname)}});
 }
 
 static string
-StructuredLayeredSearchTableMacroScript(const QualifiedName &qname) {
+StructuredLayeredSearchTableMacroScript(const FTSTableName &qname) {
   return RenderSQLTemplate(
       fts_sql::SEARCH_LAYERED_BM25_QUERY,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
@@ -344,17 +342,17 @@ StructuredLayeredSearchTableMacroScript(const QualifiedName &qname) {
             /* validate_requested_fields */ false))}});
 }
 
-static string StructuredLayeredMatchMacroScript(const QualifiedName &qname) {
+static string StructuredLayeredMatchMacroScript(const FTSTableName &qname) {
   return RenderSQLTemplate(fts_sql::MATCH_LAYERED_BM25_QUERY,
                            {{"fts_schema", GetFTSSchemaArgument(qname)}});
 }
 
-static string StructuredLayeredSearchMacroScript(const QualifiedName &qname) {
+static string StructuredLayeredSearchMacroScript(const FTSTableName &qname) {
   return StructuredLayeredSearchTableMacroScript(qname) +
          StructuredLayeredMatchMacroScript(qname);
 }
 
-static string LayeredSearchMacroScript(const QualifiedName &qname,
+static string LayeredSearchMacroScript(const FTSTableName &qname,
                                        const FTSAnalyzerConfig &analyzer_config,
                                        bool include_structured_queries) {
   auto result = LayeredSearchTableMacroScript(qname, analyzer_config) +
@@ -409,7 +407,7 @@ string FTSIndexBuilder::Create(const FTSIndexConfig &config,
 }
 
 string
-FTSIndexBuilder::CreateStructuredQueryMacros(const QualifiedName &qname) {
+FTSIndexBuilder::CreateStructuredQueryMacros(const FTSTableName &qname) {
   return StructuredLayeredSearchMacroScript(qname);
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
-#include "duckdb/common/common.hpp"
+#include "fts_common.hpp"
+
 
 namespace duckdb {
 

@@ -1,9 +1,9 @@
 #pragma once
 
-#include "duckdb/function/scalar_function.hpp"
+#include "fts_common.hpp"
 
 namespace duckdb {
 
-ScalarFunction GetFTSNearTfFunction();
+void RegisterFTSNearTf(cxx::Extension &extension, cxx::Factory &factory);
 
 } // namespace duckdb

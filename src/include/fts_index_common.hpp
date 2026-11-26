@@ -1,8 +1,8 @@
 #pragma once
 
+#include "fts_common.hpp"
 #include "fts_sql_template.hpp"
 
-#include "duckdb/parser/qualified_name.hpp"
 
 namespace duckdb {
 
@@ -20,16 +20,16 @@ enum class AnalyzeTokenStreamProjection : uint8_t {
   TOKEN_POSITION
 };
 
-string GetFTSSchemaName(const QualifiedName &qname);
-string GetFTSSchema(const QualifiedName &qname);
-SQLTemplateArgument GetFTSSchemaArgument(const QualifiedName &qname);
-string GetQualifiedTableName(const QualifiedName &qname);
-SQLTemplateArgument GetQualifiedTableArgument(const QualifiedName &qname);
-string RenderAnalyzeTokenStream(const QualifiedName &qname,
+string GetFTSSchemaName(const FTSTableName &qname);
+string GetFTSSchema(const FTSTableName &qname);
+SQLTemplateArgument GetFTSSchemaArgument(const FTSTableName &qname);
+string GetQualifiedTableName(const FTSTableName &qname);
+SQLTemplateArgument GetQualifiedTableArgument(const FTSTableName &qname);
+string RenderAnalyzeTokenStream(const FTSTableName &qname,
                                 const FTSAnalyzerConfig &config,
                                 AnalyzeTokenStreamProjection projection);
 
-string RenderQueryAnalysis(const QualifiedName &qname,
+string RenderQueryAnalysis(const FTSTableName &qname,
                            const FTSAnalyzerConfig &config);
 
 // Trigger names are "__fts_<schema>_<infix>_<NN>_<step>". DuckDB fires the
@@ -39,28 +39,28 @@ string RenderQueryAnalysis(const QualifiedName &qname,
 static constexpr const char *FTS_UPDATE_DELETE_TRIGGER_INFIX = "au_del";
 static constexpr const char *FTS_UPDATE_INSERT_TRIGGER_INFIX = "au_ins";
 
-vector<string> GetFTSInsertTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSInsertTriggerNames(const FTSTableName &qname,
                                         const string &infix = "ai");
-vector<string> GetFTSClusteredInsertTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSClusteredInsertTriggerNames(const FTSTableName &qname,
                                                  const string &infix = "ai");
-vector<string> GetFTSDeleteTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSDeleteTriggerNames(const FTSTableName &qname,
                                         const string &infix = "ad");
-vector<string> GetFTSClusteredDeleteTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSClusteredDeleteTriggerNames(const FTSTableName &qname,
                                                  const string &infix = "ad");
-vector<string> GetFTSLayeredInsertTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSLayeredInsertTriggerNames(const FTSTableName &qname,
                                                const string &infix = "ai");
-vector<string> GetFTSLayeredDeleteTriggerNames(const QualifiedName &qname,
+vector<string> GetFTSLayeredDeleteTriggerNames(const FTSTableName &qname,
                                                const string &infix = "ad");
-vector<string> GetFTSTriggerNames(const QualifiedName &qname);
+vector<string> GetFTSTriggerNames(const FTSTableName &qname);
 
-string GetFTSBuildTermsTable(const QualifiedName &qname);
-string GetFTSBuildDictTable(const QualifiedName &qname);
+string GetFTSBuildTermsTable(const FTSTableName &qname);
+string GetFTSBuildDictTable(const FTSTableName &qname);
 string GetFTSTermsStorageTable();
-string GetFTSBuildRawDictTable(const QualifiedName &qname);
-string GetFTSTermStatsTermIndex(const QualifiedName &qname);
-string GetFTSTermGramsGramIndex(const QualifiedName &qname);
-string GetFTSTermPrefixesPrefixIndex(const QualifiedName &qname);
-string GetFTSRawTermGramsGramIndex(const QualifiedName &qname);
+string GetFTSBuildRawDictTable(const FTSTableName &qname);
+string GetFTSTermStatsTermIndex(const FTSTableName &qname);
+string GetFTSTermGramsGramIndex(const FTSTableName &qname);
+string GetFTSTermPrefixesPrefixIndex(const FTSTableName &qname);
+string GetFTSRawTermGramsGramIndex(const FTSTableName &qname);
 
 string FieldLengthAggregateList(idx_t field_count);
 string ZeroFieldLengthList(idx_t field_count, const string &type);

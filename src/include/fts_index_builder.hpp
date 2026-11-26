@@ -1,19 +1,19 @@
 #pragma once
 
-#include "duckdb/common/common.hpp"
-#include "duckdb/parser/qualified_name.hpp"
+#include "fts_common.hpp"
+
 
 namespace duckdb {
 
 enum class FTSStopwordsMode : uint8_t { NONE, ENGLISH, TABLE };
 
 struct FTSIndexConfig {
-  QualifiedName input_table;
+  FTSTableName input_table;
   string input_id;
   vector<string> input_values;
   string stemmer;
   FTSStopwordsMode stopwords_mode = FTSStopwordsMode::ENGLISH;
-  QualifiedName stopwords_table;
+  FTSTableName stopwords_table;
   string tokenizer;
   string ignore;
   bool strip_accents = true;
@@ -28,7 +28,7 @@ class FTSIndexBuilder {
 public:
   static string Create(const FTSIndexConfig &config,
                        bool drop_existing_triggers);
-  static string CreateStructuredQueryMacros(const QualifiedName &qname);
+  static string CreateStructuredQueryMacros(const FTSTableName &qname);
 };
 
 } // namespace duckdb

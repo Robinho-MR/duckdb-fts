@@ -1,6 +1,6 @@
 #include "fts_unicode_classifier.hpp"
 
-#include "duckdb/common/common.hpp"
+#include "fts_common.hpp"
 #include "fts_unicode_data.hpp"
 
 namespace duckdb {

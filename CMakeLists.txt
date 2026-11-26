@@ -1,7 +1,5 @@
-cmake_minimum_required(VERSION 2.8.12...3.29)
+cmake_minimum_required(VERSION 3.5...3.29)
 set(TARGET_NAME fts)
-set(EXTENSION_NAME ${TARGET_NAME}_extension)
-set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(FTSExtension)
 
@@ -59,22 +57,14 @@ include(cmake/GenerateFTSSQLAssets.cmake)
 generate_fts_sql_assets("${FTS_SQL_GENERATED_DIR}" ${FTS_SQL_ASSETS})
 
 set(SNOWBALL_BASE_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/third_party/snowball")
-if(DEFINED DUCKDB_MODULE_BASE_DIR)
-  set(DUCKDB_SOURCE_BASE_FOLDER "${DUCKDB_MODULE_BASE_DIR}")
-else()
-  set(DUCKDB_SOURCE_BASE_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/duckdb")
-endif()
-include_directories(
-  ${EXTENSION_BASE_FOLDER}/include
-  ${FTS_SQL_GENERATED_DIR}
-  ${SNOWBALL_BASE_FOLDER}/include
-  ${SNOWBALL_BASE_FOLDER}/libstemmer
-  ${SNOWBALL_BASE_FOLDER}/runtime
-  ${DUCKDB_SOURCE_BASE_FOLDER}/third_party/utf8proc/include)
 
 file(GLOB SNOWBALL_STEMMER_SOURCES CONFIGURE_DEPENDS
      ${SNOWBALL_BASE_FOLDER}/src_c/stem_*.c)
 
+# The extension is written against DuckDB's stable C++ API only: it includes
+# duckdb_cpp.hpp (and duckdb_cpp_extension.hpp for its entrypoint) and the
+# headers of RE2 and utf8proc, and links the C++ API archive, RE2 and utf8proc.
+# It does not depend on the internals of the DuckDB it is loaded into.
 set(EXTENSION_SOURCES
     ${EXTENSION_BASE_FOLDER}/fts_extension.cpp
     ${EXTENSION_BASE_FOLDER}/fts_index_builder.cpp
@@ -93,12 +83,22 @@ set(EXTENSION_SOURCES
     ${SNOWBALL_BASE_FOLDER}/runtime/utilities.c
     ${SNOWBALL_STEMMER_SOURCES})
 
-build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
-set(PARAMETERS "-warnings")
-build_loadable_extension(${TARGET_NAME} ${PARAMETERS} ${EXTENSION_SOURCES})
+build_loadable_extension_capi_unstable(${TARGET_NAME} "" ${EXTENSION_SOURCES})
+target_compile_definitions(${TARGET_NAME}_loadable_extension
+                           PRIVATE DUCKDB_CPP_API_LOADABLE)
+target_include_directories(
+  ${TARGET_NAME}_loadable_extension
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/${EXTENSION_BASE_FOLDER}/include
+          ${FTS_SQL_GENERATED_DIR}
+          ${SNOWBALL_BASE_FOLDER}/include
+          ${SNOWBALL_BASE_FOLDER}/libstemmer
+          ${SNOWBALL_BASE_FOLDER}/runtime
+          ${DUCKDB_MODULE_BASE_DIR}/tools/cpp
+          ${DUCKDB_MODULE_BASE_DIR}/third_party/re2
+          ${DUCKDB_MODULE_BASE_DIR}/third_party/utf8proc/include)
+target_link_libraries(${TARGET_NAME}_loadable_extension
+                      duckdb_cpp_api_loadable duckdb_re2 duckdb_utf8proc)
 
-install(
-  TARGETS ${EXTENSION_NAME}
-  EXPORT "${DUCKDB_EXPORT_SET}"
-  LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
-  ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+if(MSVC)
+  target_compile_options(${TARGET_NAME}_loadable_extension PRIVATE /bigobj)
+endif()

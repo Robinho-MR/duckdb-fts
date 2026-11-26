@@ -1,15 +1,7 @@
-#include "fts_extension.hpp"
+#include "duckdb_cpp_extension.hpp"
 
-#include "duckdb.hpp"
-#include "duckdb/common/exception.hpp"
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/common/vector/list_vector.hpp"
-#include "duckdb/common/vector/string_vector.hpp"
-#include "duckdb/common/vector/vector_writer.hpp"
-#include "duckdb/function/pragma_function.hpp"
-#include "duckdb/function/scalar_function.hpp"
-#include "duckdb/main/extension/extension_loader.hpp"
+#include "fts_common.hpp"
+#include "fts_extension.hpp"
 #include "fts_highlight.hpp"
 #include "fts_indexing.hpp"
 #include "fts_near.hpp"
@@ -17,149 +9,140 @@
 #include "fts_pattern.hpp"
 #include "fts_tokenizer.hpp"
 #include "fts_unicode_classifier.hpp"
+#include "fts_vector.hpp"
 #include "libstemmer.h"
-#include "utf8proc_wrapper.hpp"
 
 namespace duckdb {
 
-static void OpenSearchStandardTokenizeFunction(DataChunk &args,
-                                               ExpressionState &state,
-                                               Vector &result) {
-  auto input_entries = args.data[0].Values<string_t>();
+static void OpenSearchStandardTokenizeFunction(
+    cxx::ScalarFunction::ExecInput &input) {
+  auto count = input.GetRowCount();
+  FTSInput<cxx::varchar_t> inputs(input.GetArg(0));
 
-  D_ASSERT(result.GetType().id() == LogicalTypeId::LIST);
-  result.SetVectorType(VectorType::FLAT_VECTOR);
-
-  auto list_writer =
-      FlatVector::Writer<VectorListType<string_t>>(result, args.size());
-  for (idx_t i = 0; i < args.size(); i++) {
-    auto input_entry = input_entries[i];
-    if (!input_entry.IsValid()) {
-      list_writer.WriteNull();
+  struct Token {
+    const char *data;
+    uint32_t size;
+  };
+  vector<Token> tokens;
+  vector<cxx::list_entry_t> entries(count);
+  vector<bool> is_null(count, false);
+  for (idx_t i = 0; i < count; i++) {
+    entries[i].offset = tokens.size();
+    if (!inputs.IsValid(i)) {
+      is_null[i] = true;
       continue;
     }
-    auto list = list_writer.WriteDynamicList();
-    auto input_value = input_entry.GetValue();
-    ScanOpenSearchStandardTokens(input_value.GetData(), input_value.GetSize(),
+    const auto &value = inputs.Get(i);
+    ScanOpenSearchStandardTokens(value.data(), value.size(),
                                  [&](idx_t start, idx_t size) {
-                                   list.WriteElement().WriteStringRef(string_t(
-                                       input_value.GetData() + start,
-                                       UnsafeNumericCast<uint32_t>(size)));
+                                   tokens.push_back(
+                                       {value.data() + start,
+                                        UnsafeNumericCast<uint32_t>(size)});
                                  });
+    entries[i].length = tokens.size() - entries[i].offset;
   }
 
-  StringVector::AddHeapReference(ListVector::GetChildMutable(result),
-                                 args.data[0]);
+  auto result = input.GetResult();
+  result.SetSize(count);
+  auto result_entries = result.GetDataMutable<cxx::list_entry_t>();
+  FTSNulls nulls(result, count);
+  for (idx_t i = 0; i < count; i++) {
+    result_entries[i] = entries[i];
+    if (is_null[i]) {
+      nulls.SetNull(i);
+    }
+  }
+  auto child = result.GetChild(0);
+  child.SetSize(tokens.size());
+  child.GetValidityMutable().SetAllValid(tokens.size());
+  for (idx_t i = 0; i < tokens.size(); i++) {
+    child.AssignStringUnsafe(
+        i, std::string_view(tokens[i].data, tokens[i].size));
+  }
 }
 
-static void StemFunction(DataChunk &args, ExpressionState &state,
-                         Vector &result) {
-  auto &input_vector = args.data[0];
-  auto &stemmer_vector = args.data[1];
+static void StemFunction(cxx::ScalarFunction::ExecInput &input) {
+  auto count = input.GetRowCount();
+  FTSInput<cxx::varchar_t> inputs(input.GetArg(0));
+  FTSInput<cxx::varchar_t> stemmers(input.GetArg(1));
 
-  BinaryExecutor::Execute<string_t, string_t, string_t>(
-      input_vector, stemmer_vector, result, args.size(),
-      [&](string_t input, string_t stemmer) {
-        auto input_data = input.GetData();
-        auto input_size = input.GetSize();
+  auto result = input.GetResult();
+  result.SetSize(count);
+  FTSNulls nulls(result, count);
+  for (idx_t i = 0; i < count; i++) {
+    if (!inputs.IsValid(i) || !stemmers.IsValid(i)) {
+      result.AssignString(i, "");
+      nulls.SetNull(i);
+      continue;
+    }
+    auto value = inputs.Get(i);
+    auto stemmer = string(stemmers.Get(i).view());
+    if (stemmer == "none") {
+      result.AssignString(i, value.view());
+      continue;
+    }
+    struct sb_stemmer *s = sb_stemmer_new(stemmer.c_str(), "UTF_8");
+    if (s == nullptr) {
+      const char **stemmers_list = sb_stemmer_list();
+      size_t n_stemmers = 0;
+      while (stemmers_list[n_stemmers] != nullptr) {
+        n_stemmers++;
+      }
+      Throw<InvalidInputException>(
+          "Unrecognized stemmer '%s'. Supported stemmers are: ['%s'], or use "
+          "'none' for no stemming",
+          stemmer,
+          Join(stemmers_list, n_stemmers, "', '",
+               [](const char *st) { return string(st); }));
+    }
+    auto output_data = reinterpret_cast<const char *>(sb_stemmer_stem(
+        s, reinterpret_cast<const sb_symbol *>(value.data()), value.size()));
+    auto output_size = sb_stemmer_length(s);
+    try {
+      result.AssignString(
+          i, std::string_view(output_data, static_cast<size_t>(output_size)));
+    } catch (...) {
+      sb_stemmer_delete(s);
+      throw;
+    }
+    sb_stemmer_delete(s);
+  }
+}
 
-        if (stemmer.GetString() == "none") {
-          auto output = StringVector::AddString(result, input_data, input_size);
-          return output;
-        }
+void RegisterFTSScalarFunctions(cxx::Extension &extension,
+                                cxx::Factory &factory) {
+  auto varchar = factory.ParseType("VARCHAR");
+  auto positional = cxx::FunctionParameterKind::POSITIONAL_ONLY;
 
-        struct sb_stemmer *s =
-            sb_stemmer_new(stemmer.GetString().c_str(), "UTF_8");
-        if (s == 0) {
-          const char **stemmers = sb_stemmer_list();
-          size_t n_stemmers = 0;
-          while (stemmers[n_stemmers] != nullptr) {
-            n_stemmers++;
-          }
-          throw InvalidInputException(
-              "Unrecognized stemmer '%s'. Supported stemmers are: ['%s'], or "
-              "use 'none' for no stemming",
-              stemmer.GetString(),
-              StringUtil::Join(stemmers, n_stemmers, "', '",
-                               [](const char *st) { return st; }));
-        }
-
-        auto output_data = const_char_ptr_cast(sb_stemmer_stem(
-            s, reinterpret_cast<const sb_symbol *>(input_data), input_size));
-        auto output_size = sb_stemmer_length(s);
-        auto output = StringVector::AddString(result, output_data, output_size);
-
-        sb_stemmer_delete(s);
-        return output;
+  auto stem_function = cxx::ScalarFunction::Create(factory);
+  stem_function.SetName("stem").SetExecCallback(StemFunction).WithSignature(
+      [&](cxx::FunctionSignature &signature) {
+        signature.AddParameter("input", varchar, positional)
+            .AddParameter("stemmer", varchar, positional)
+            .SetReturnType(varchar);
       });
-}
+  extension.Register(stem_function);
 
-static void LoadInternal(ExtensionLoader &loader) {
-
-  ScalarFunction stem_func("stem", {LogicalType::VARCHAR, LogicalType::VARCHAR},
-                           LogicalType::VARCHAR, StemFunction);
-  stem_func.SetFallible();
-  ScalarFunction opensearch_standard_tokenize_func(
-      "fts_tokenize_opensearch_standard", {LogicalType::VARCHAR},
-      LogicalType::LIST(LogicalType::VARCHAR),
-      OpenSearchStandardTokenizeFunction);
-  opensearch_standard_tokenize_func.SetFallible();
-
-  FunctionSignature create_fts_index_signature;
-  create_fts_index_signature.AddParameter("input_table", LogicalType::VARCHAR)
-      .AddParameter("input_id", LogicalType::VARCHAR)
-      .AddArgs("input_values", LogicalType::VARCHAR)
-      .WithTypedKwargs("options", [&](TypedKwargs &options) {
-        options.Add("stemmer", LogicalType::VARCHAR)
-            .Add("tokenizer", LogicalType::VARCHAR)
-            .Add("stopwords", LogicalType::VARCHAR)
-            .Add("ignore", LogicalType::VARCHAR)
-            .Add("strip_accents", LogicalType::BOOLEAN)
-            .Add("lower", LogicalType::BOOLEAN)
-            .Add("overwrite", LogicalType::BOOLEAN)
-            .Add("incremental", LogicalType::BOOLEAN)
-            .Add("cluster_terms", LogicalType::BOOLEAN)
-            .Add("layered_search", LogicalType::BOOLEAN);
+  auto tokenize_function = cxx::ScalarFunction::Create(factory);
+  tokenize_function.SetName("fts_tokenize_opensearch_standard")
+      .SetExecCallback(OpenSearchStandardTokenizeFunction)
+      .WithSignature([&](cxx::FunctionSignature &signature) {
+        signature.AddParameter("input", varchar, positional)
+            .SetReturnType(factory.ParseType("VARCHAR[]"));
       });
-  auto create_fts_index_func = PragmaFunction::PragmaCall(
-      "create_fts_index", FTSIndexing::CreateFTSIndexQuery,
-      std::move(create_fts_index_signature));
+  extension.Register(tokenize_function);
 
-  FunctionSignature input_table_signature;
-  input_table_signature.AddParameter("input_table", LogicalType::VARCHAR);
-  auto drop_fts_index_func = PragmaFunction::PragmaCall(
-      "drop_fts_index", FTSIndexing::DropFTSIndexQuery, input_table_signature);
-  auto create_fts_boolean_query_macros_func = PragmaFunction::PragmaCall(
-      "create_fts_boolean_query_macros",
-      FTSIndexing::CreateFTSBooleanQueryMacrosQuery, input_table_signature);
-
-  loader.RegisterFunction(stem_func);
-  loader.RegisterFunction(opensearch_standard_tokenize_func);
-  loader.RegisterFunction(GetFTSRenderHighlightFunction());
-  loader.RegisterFunction(GetFTSTokenizeFunction());
-  loader.RegisterFunction(GetFTSTokenizeSpansFunction());
-  loader.RegisterFunction(GetFTSAnalyzePatternFunction());
-  loader.RegisterFunction(GetFTSNearTfFunction());
-  loader.RegisterFunction(create_fts_index_func);
-  loader.RegisterFunction(create_fts_boolean_query_macros_func);
-  loader.RegisterFunction(drop_fts_index_func);
-}
-
-void FtsExtension::Load(ExtensionLoader &loader) { LoadInternal(loader); }
-
-std::string FtsExtension::Name() { return "fts"; }
-
-std::string FtsExtension::Version() const {
-#ifdef EXT_VERSION_FTS
-  return EXT_VERSION_FTS;
-#else
-  return "";
-#endif
+  RegisterFTSRenderHighlight(extension, factory);
+  RegisterFTSTokenize(extension, factory);
+  RegisterFTSAnalyzePattern(extension, factory);
+  RegisterFTSNearTf(extension, factory);
 }
 
 } // namespace duckdb
 
-extern "C" {
-
-DUCKDB_CPP_EXTENSION_ENTRY(fts, loader) { duckdb::LoadInternal(loader); }
+DUCKDB_CPP_EXTENSION_ENTRYPOINT(duckdb::cxx::Extension &extension,
+                                duckdb::cxx::Context &context) {
+  auto &factory = context.GetFactory();
+  duckdb::RegisterFTSScalarFunctions(extension, factory);
+  duckdb::FTSIndexing::Register(extension, factory);
 }

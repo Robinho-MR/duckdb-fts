@@ -8,15 +8,12 @@
 
 #pragma once
 
-#include "duckdb.hpp"
+#include "fts_common.hpp"
 
 namespace duckdb {
 
-class FtsExtension : public Extension {
-public:
-  void Load(ExtensionLoader &loader) override;
-  std::string Name() override;
-  std::string Version() const override;
-};
+//! Registers the functions of the extension that compute on vectors
+void RegisterFTSScalarFunctions(cxx::Extension &extension,
+                                cxx::Factory &factory);
 
 } // namespace duckdb

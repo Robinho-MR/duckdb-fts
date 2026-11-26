@@ -4,9 +4,6 @@
 #include "fts_sql_assets.hpp"
 #include "fts_sql_template.hpp"
 
-#include "duckdb/common/case_insensitive_map.hpp"
-#include "duckdb/common/sql_identifier.hpp"
-#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
@@ -30,26 +27,26 @@ GetTriggerPhases(const string &input_id, const vector<string> &input_values) {
   // renames duplicate columns (id, ID, id_1 becomes id, ID_1, id_1_1), so a
   // column projected twice would make the triggers read the wrong one.
   case_insensitive_set_t seen{input_id};
-  vector<string> columns{SQLIdentifier::ToString(input_id)};
+  vector<string> columns{QuoteIdentifier(input_id)};
   for (auto &input_value : input_values) {
     if (seen.insert(input_value).second) {
-      columns.push_back(SQLIdentifier::ToString(input_value));
+      columns.push_back(QuoteIdentifier(input_value));
     }
   }
-  auto column_list = StringUtil::Join(columns, ", ");
+  auto column_list = Join(columns, ", ");
   // EXCEPT ALL compares a collated column under its collation, which for
   // nocase makes HELLO equal to hello although they tokenize differently. The
   // rows are therefore also compared by their bytes; encode() takes a VARCHAR
   // and the document id may be of another type.
   auto compared_list =
-      StringUtil::Join(columns, columns.size(), ", ", [](const string &column) {
-        return StringUtil::Format("%s, encode(%s::VARCHAR)", column, column);
+      Join(columns, columns.size(), ", ", [](const string &column) {
+        return Format("%s, encode(%s::VARCHAR)", column, column);
       });
   // An UPDATE only has to reindex rows whose document id or indexed text
   // changed. EXCEPT ALL keeps duplicate ids produced by the UPDATE, so the
   // unique index on docs(name) still rejects them as it does for INSERT.
   auto changed_rows = [&](const string &from, const string &other) {
-    return StringUtil::Format(
+    return Format(
         "(SELECT %s FROM (SELECT %s FROM %s EXCEPT ALL SELECT %s FROM %s))",
         column_list, compared_list, from, compared_list, other);
   };
@@ -68,11 +65,11 @@ static string StatsDeltaFieldList(idx_t field_count, const string &operation,
   vector<string> field_lengths;
   for (idx_t field_id = 0; field_id < field_count; field_id++) {
     auto value =
-        StringUtil::Format("list_extract(fts_stats.total_field_lens, %i) %s "
+        Format("list_extract(fts_stats.total_field_lens, %i) %s "
                            "delta.field_len_%i",
                            field_id + 1, operation, field_id);
     if (average) {
-      value = StringUtil::Format(
+      value = Format(
           "(%s)::DOUBLE / (fts_stats.num_docs %s delta.num_docs)", value,
           operation);
     } else {
@@ -80,17 +77,17 @@ static string StatsDeltaFieldList(idx_t field_count, const string &operation,
     }
     field_lengths.push_back(value);
   }
-  return "list_value(" + StringUtil::Join(field_lengths, ", ") + ")";
+  return "list_value(" + Join(field_lengths, ", ") + ")";
 }
 
-static string StatsDeltaUpdateStatement(const QualifiedName &qname,
+static string StatsDeltaUpdateStatement(const FTSTableName &qname,
                                         const string &input_id,
                                         idx_t field_count,
                                         const TriggerPhase &phase) {
   auto operation = phase.insert ? "+" : "-";
   vector<string> delta_field_lengths;
   for (idx_t field_id = 0; field_id < field_count; field_id++) {
-    delta_field_lengths.push_back(StringUtil::Format(
+    delta_field_lengths.push_back(Format(
         "coalesce(sum(list_extract(docs.field_lens, %i)), 0)::HUGEINT AS "
         "field_len_%i",
         field_id + 1, field_id));
@@ -107,14 +104,14 @@ static string StatsDeltaUpdateStatement(const QualifiedName &qname,
         SQLTemplateArgument::TrustedSQL(
             StatsDeltaFieldList(field_count, operation, false))},
        {"delta_field_lengths",
-        SQLTemplateArgument::TrustedSQL(StringUtil::Join(
+        SQLTemplateArgument::TrustedSQL(Join(
             delta_field_lengths, ",\n                       "))},
        {"changed_rows", SQLTemplateArgument::TrustedSQL(phase.rows)},
        {"input_id", SQLTemplateArgument::Identifier(input_id)}});
 }
 
 static vector<SQLTemplateBinding>
-TriggerEventBindings(const QualifiedName &qname, const TriggerPhase &phase) {
+TriggerEventBindings(const FTSTableName &qname, const TriggerPhase &phase) {
   return {{"trigger_event", SQLTemplateArgument::TrustedSQL(phase.event)},
           {"transition_tables",
            SQLTemplateArgument::TrustedSQL(phase.transition_tables)},
@@ -123,7 +120,7 @@ TriggerEventBindings(const QualifiedName &qname, const TriggerPhase &phase) {
 }
 
 static string RenderTriggers(const SQLTemplateAsset &asset,
-                             const QualifiedName &qname,
+                             const FTSTableName &qname,
                              const TriggerPhase &phase,
                              vector<SQLTemplateBinding> bindings) {
   auto event_bindings = TriggerEventBindings(qname, phase);
@@ -131,27 +128,27 @@ static string RenderTriggers(const SQLTemplateAsset &asset,
   return RenderSQLTemplate(asset, bindings);
 }
 
-string FTSIndexMaintenance::DropTriggers(const QualifiedName &qname) {
+string FTSIndexMaintenance::DropTriggers(const FTSTableName &qname) {
   vector<string> statements;
   auto input_table = GetQualifiedTableName(qname);
   for (auto &trigger_name : GetFTSTriggerNames(qname)) {
     statements.push_back(
-        StringUtil::Format("DROP TRIGGER IF EXISTS %s ON %s;",
-                           SQLIdentifier::ToString(trigger_name), input_table));
+        Format("DROP TRIGGER IF EXISTS %s ON %s;",
+                           QuoteIdentifier(trigger_name), input_table));
   }
-  return StringUtil::Join(statements, "\n");
+  return Join(statements, "\n");
 }
 
-static string IncrementalIndexSetupScript(const QualifiedName &qname) {
+static string IncrementalIndexSetupScript(const FTSTableName &qname) {
   auto index_name =
-      StringUtil::Format("__fts_%s_docs_name_idx", GetFTSSchemaName(qname));
+      Format("__fts_%s_docs_name_idx", GetFTSSchemaName(qname));
   return RenderSQLTemplate(
       fts_sql::INCREMENTAL_INDEX_SETUP,
       {{"index_name", SQLTemplateArgument::Identifier(index_name)},
        {"fts_schema", GetFTSSchemaArgument(qname)}});
 }
 
-static string ClusteredIncrementalIndexSetupScript(const QualifiedName &qname) {
+static string ClusteredIncrementalIndexSetupScript(const FTSTableName &qname) {
   return RenderSQLTemplate(
       fts_sql::CLUSTERED_INCREMENTAL_INDEX_SETUP,
       {{"fts_schema", GetFTSSchemaArgument(qname)},
@@ -159,14 +156,14 @@ static string ClusteredIncrementalIndexSetupScript(const QualifiedName &qname) {
         SQLTemplateArgument::TrustedSQL(GetFTSTermsStorageTable())}});
 }
 
-static string LayeredAffectedTermIdsSubquery(const QualifiedName &qname,
+static string LayeredAffectedTermIdsSubquery(const FTSTableName &qname,
                                              const string &token_ctes) {
   return token_ctes +
          RenderSQLTemplate(fts_sql::LAYERED_AFFECTED_TERM_IDS,
                            {{"fts_schema", GetFTSSchemaArgument(qname)}});
 }
 
-static string LayeredInsertNewTermsTriggerScript(const QualifiedName &qname,
+static string LayeredInsertNewTermsTriggerScript(const FTSTableName &qname,
                                                  const TriggerPhase &phase,
                                                  const string &token_ctes) {
   auto trigger_names = GetFTSLayeredInsertTriggerNames(qname, phase.name_infix);
@@ -187,7 +184,7 @@ static string LayeredInsertNewTermsTriggerScript(const QualifiedName &qname,
        {"token_ctes", SQLTemplateArgument::TrustedSQL(token_ctes)}});
 }
 
-static string LayeredInsertDFTriggerScript(const QualifiedName &qname,
+static string LayeredInsertDFTriggerScript(const FTSTableName &qname,
                                            const TriggerPhase &phase,
                                            const string &token_ctes,
                                            const string &input_id) {
@@ -207,7 +204,7 @@ static string LayeredInsertDFTriggerScript(const QualifiedName &qname,
         SQLTemplateArgument::TrustedSQL(affected_termids)}});
 }
 
-static string LayeredDeleteBeforeTermsTriggerScript(const QualifiedName &qname,
+static string LayeredDeleteBeforeTermsTriggerScript(const FTSTableName &qname,
                                                     const TriggerPhase &phase,
                                                     const string &input_id) {
   auto trigger_names = GetFTSLayeredDeleteTriggerNames(qname, phase.name_infix);
@@ -219,7 +216,7 @@ static string LayeredDeleteBeforeTermsTriggerScript(const QualifiedName &qname,
        {"old_rows", SQLTemplateArgument::TrustedSQL(phase.rows)}});
 }
 
-static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname,
+static string LayeredDeleteAfterDFTriggerScript(const FTSTableName &qname,
                                                 const TriggerPhase &phase,
                                                 const string &token_ctes) {
   auto trigger_names = GetFTSLayeredDeleteTriggerNames(qname, phase.name_infix);
@@ -246,13 +243,13 @@ static string LayeredDeleteAfterDFTriggerScript(const QualifiedName &qname,
 }
 
 static vector<string> BuildInsertedFieldQueries(
-    const QualifiedName &qname, const vector<string> &input_values,
+    const FTSTableName &qname, const vector<string> &input_values,
     vector<string> &input_value_selects, bool include_positions) {
   vector<string> tokenize_fields;
   for (auto &input_value : input_values) {
-    input_value_selects.push_back(StringUtil::Format(
-        "fts_new_rows.%s AS %s", SQLIdentifier::ToString(input_value),
-        SQLIdentifier::ToString(input_value)));
+    input_value_selects.push_back(Format(
+        "fts_new_rows.%s AS %s", QuoteIdentifier(input_value),
+        QuoteIdentifier(input_value)));
     tokenize_fields.push_back(RenderSQLTemplate(
         include_positions ? fts_sql::TOKENIZE_INSERTED_POSITIONAL_FIELD
                           : fts_sql::TOKENIZE_INSERTED_FIELD,
@@ -265,7 +262,7 @@ static vector<string> BuildInsertedFieldQueries(
 }
 
 static string RenderNewDocsCTE(const SQLTemplateAsset &asset,
-                               const QualifiedName &qname,
+                               const FTSTableName &qname,
                                const TriggerPhase &phase,
                                const string &input_id,
                                const string &input_value_select_list) {
@@ -277,7 +274,7 @@ static string RenderNewDocsCTE(const SQLTemplateAsset &asset,
                SQLTemplateArgument::TrustedSQL(input_value_select_list)}});
 }
 
-static string InsertTriggerScript(const QualifiedName &qname,
+static string InsertTriggerScript(const FTSTableName &qname,
                                   const TriggerPhase &phase,
                                   const string &input_id,
                                   const vector<string> &input_values,
@@ -287,8 +284,8 @@ static string InsertTriggerScript(const QualifiedName &qname,
   auto tokenize_fields = BuildInsertedFieldQueries(
       qname, input_values, input_value_selects, layered_search);
   auto input_value_select_list =
-      StringUtil::Join(input_value_selects, ",\n                   ");
-  auto union_fields_query = StringUtil::Join(tokenize_fields, " UNION ALL ");
+      Join(input_value_selects, ",\n                   ");
+  auto union_fields_query = Join(tokenize_fields, " UNION ALL ");
   auto docs_new_docs_cte =
       RenderNewDocsCTE(fts_sql::INSERT_DOCS_CTE, qname, phase, input_id,
                        input_value_select_list);
@@ -367,7 +364,7 @@ static string InsertTriggerScript(const QualifiedName &qname,
 }
 
 static string
-ClusteredInsertTriggerScript(const QualifiedName &qname,
+ClusteredInsertTriggerScript(const FTSTableName &qname,
                              const TriggerPhase &phase, const string &input_id,
                              const vector<string> &input_values,
                              const FTSAnalyzerConfig &analyzer_config) {
@@ -375,8 +372,8 @@ ClusteredInsertTriggerScript(const QualifiedName &qname,
   auto tokenize_fields = BuildInsertedFieldQueries(qname, input_values,
                                                    input_value_selects, false);
   auto input_value_select_list =
-      StringUtil::Join(input_value_selects, ",\n                   ");
-  auto union_fields_query = StringUtil::Join(tokenize_fields, " UNION ALL ");
+      Join(input_value_selects, ",\n                   ");
+  auto union_fields_query = Join(tokenize_fields, " UNION ALL ");
   auto docs_new_docs_cte =
       RenderNewDocsCTE(fts_sql::INSERT_DOCS_CTE, qname, phase, input_id,
                        input_value_select_list);
@@ -428,7 +425,7 @@ ClusteredInsertTriggerScript(const QualifiedName &qname,
             qname, input_id, input_values.size(), phase))}});
 }
 
-static string DeleteTriggerScript(const QualifiedName &qname,
+static string DeleteTriggerScript(const FTSTableName &qname,
                                   const TriggerPhase &phase,
                                   const string &input_id,
                                   const vector<string> &input_values,
@@ -444,7 +441,7 @@ static string DeleteTriggerScript(const QualifiedName &qname,
   }
   auto token_ctes = RenderSQLTemplate(
       fts_sql::DELETE_TOKEN_CTES,
-      {{"union_fields_query", SQLTemplateArgument::TrustedSQL(StringUtil::Join(
+      {{"union_fields_query", SQLTemplateArgument::TrustedSQL(Join(
                                   tokenize_fields, " UNION ALL "))},
        {"analyzed_tokens",
         SQLTemplateArgument::TrustedSQL(RenderAnalyzeTokenStream(
@@ -476,7 +473,7 @@ static string DeleteTriggerScript(const QualifiedName &qname,
                 : "")}});
 }
 
-static string ClusteredDeleteTriggerScript(const QualifiedName &qname,
+static string ClusteredDeleteTriggerScript(const FTSTableName &qname,
                                            const TriggerPhase &phase,
                                            const string &input_id,
                                            idx_t field_count) {
@@ -501,7 +498,7 @@ static string ClusteredDeleteTriggerScript(const QualifiedName &qname,
        {"old_rows", SQLTemplateArgument::TrustedSQL(phase.rows)}});
 }
 
-string FTSIndexMaintenance::Create(const QualifiedName &qname,
+string FTSIndexMaintenance::Create(const FTSTableName &qname,
                                    const string &input_id,
                                    const vector<string> &input_values,
                                    const FTSIndexMaintenanceConfig &config) {

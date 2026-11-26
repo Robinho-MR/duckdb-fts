@@ -1,10 +1,8 @@
 #include "fts_pattern.hpp"
 
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/common/vector/struct_vector.hpp"
-#include "duckdb/common/vector/vector_writer.hpp"
+#include "fts_vector.hpp"
+
 #include "re2/re2.h"
-#include "utf8proc_wrapper.hpp"
 
 namespace duckdb {
 
@@ -310,7 +308,7 @@ static PatternAnalysis AnalyzePattern(const string &pattern,
   PatternAnalysis analysis;
   vector<PatternToken> tokens;
 
-  auto mode = StringUtil::Lower(pattern_mode);
+  auto mode = LowerASCII(pattern_mode);
   if (pattern.empty()) {
     analysis.error_message = "pattern must not be empty";
     return analysis;
@@ -349,63 +347,66 @@ static PatternAnalysis AnalyzePattern(const string &pattern,
   return analysis;
 }
 
-static void AnalyzePatternFunction(DataChunk &args, ExpressionState &state,
-                                   Vector &result) {
-  UnifiedVectorFormat pattern_data;
-  UnifiedVectorFormat mode_data;
-  args.data[0].ToUnifiedFormat(pattern_data);
-  args.data[1].ToUnifiedFormat(mode_data);
-  auto patterns = UnifiedVectorFormat::GetData<string_t>(pattern_data);
-  auto modes = UnifiedVectorFormat::GetData<string_t>(mode_data);
+static void AnalyzePatternFunction(cxx::ScalarFunction::ExecInput &input) {
+  auto count = input.GetRowCount();
+  FTSInput<cxx::varchar_t> patterns(input.GetArg(0));
+  FTSInput<cxx::varchar_t> modes(input.GetArg(1));
 
-  result.SetVectorType(VectorType::FLAT_VECTOR);
-  FlatVector::ValidityMutable(result).SetAllValid(args.size());
-  auto &children = StructVector::GetEntries(result);
-  auto verification_writer =
-      FlatVector::Writer<string_t>(children[0], args.size());
-  auto kind_writer = FlatVector::Writer<string_t>(children[1], args.size());
-  auto literal_writer = FlatVector::Writer<string_t>(children[2], args.size());
-  auto error_writer = FlatVector::Writer<string_t>(children[3], args.size());
+  auto result = input.GetResult();
+  FTSSetSizeAllValid(result, count);
+  auto verification_column = result.GetChild(0);
+  auto kind_column = result.GetChild(1);
+  auto literal_column = result.GetChild(2);
+  auto error_column = result.GetChild(3);
+  FTSSetSizeAllValid(verification_column, count);
+  FTSSetSizeAllValid(kind_column, count);
+  FTSSetSizeAllValid(literal_column, count);
+  FTSSetSizeAllValid(error_column, count);
 
-  for (idx_t row = 0; row < args.size(); row++) {
-    auto pattern_index = pattern_data.sel->get_index(row);
-    auto mode_index = mode_data.sel->get_index(row);
+  for (idx_t row = 0; row < count; row++) {
     PatternAnalysis analysis;
-    if (!pattern_data.validity.RowIsValid(pattern_index)) {
+    if (!patterns.IsValid(row)) {
       analysis.error_message = "pattern must not be NULL";
-    } else if (!mode_data.validity.RowIsValid(mode_index)) {
+    } else if (!modes.IsValid(row)) {
       analysis.error_message = "pattern mode must be wildcard or regex";
     } else {
-      analysis = AnalyzePattern(patterns[pattern_index].GetString(),
-                                modes[mode_index].GetString());
+      analysis = AnalyzePattern(string(patterns.Get(row).view()),
+                                string(modes.Get(row).view()));
     }
 
     if (analysis.error_message.empty()) {
-      verification_writer.WriteValue(analysis.verification_pattern);
-      kind_writer.WriteValue(analysis.lookup_kind);
-      literal_writer.WriteValue(analysis.lookup_literal);
-      error_writer.WriteNull();
+      verification_column.AssignString(row, analysis.verification_pattern);
+      kind_column.AssignString(row, analysis.lookup_kind);
+      literal_column.AssignString(row, analysis.lookup_literal);
+      error_column.AssignString(row, "");
+      error_column.GetValidityMutable().SetInvalid(row);
     } else {
-      verification_writer.WriteValue(string());
-      kind_writer.WriteNull();
-      literal_writer.WriteNull();
-      error_writer.WriteValue(analysis.error_message);
+      verification_column.AssignString(row, "");
+      kind_column.AssignString(row, "");
+      kind_column.GetValidityMutable().SetInvalid(row);
+      literal_column.AssignString(row, "");
+      literal_column.GetValidityMutable().SetInvalid(row);
+      error_column.AssignString(row, analysis.error_message);
     }
   }
 }
 
-ScalarFunction GetFTSAnalyzePatternFunction() {
-  auto return_type =
-      LogicalType::STRUCT({{"verification_pattern", LogicalType::VARCHAR},
-                           {"lookup_kind", LogicalType::VARCHAR},
-                           {"lookup_literal", LogicalType::VARCHAR},
-                           {"error_message", LogicalType::VARCHAR}});
-  ScalarFunction function("fts_analyze_pattern",
-                          {LogicalType::VARCHAR, LogicalType::VARCHAR},
-                          return_type, AnalyzePatternFunction);
-  function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-  function.SetFallible();
-  return function;
+void RegisterFTSAnalyzePattern(cxx::Extension &extension,
+                               cxx::Factory &factory) {
+  auto function = cxx::ScalarFunction::Create(factory);
+  function.SetName("fts_analyze_pattern")
+      .SetExecCallback(AnalyzePatternFunction)
+      .SetNullHandling(cxx::FunctionNullHandling::SPECIAL)
+      .WithSignature([&](cxx::FunctionSignature &signature) {
+        auto varchar = factory.ParseType("VARCHAR");
+        auto positional = cxx::FunctionParameterKind::POSITIONAL_ONLY;
+        signature.AddParameter("pattern", varchar, positional)
+            .AddParameter("mode", varchar, positional)
+            .SetReturnType(factory.ParseType(
+                "STRUCT(verification_pattern VARCHAR, lookup_kind VARCHAR, "
+                "lookup_literal VARCHAR, error_message VARCHAR)"));
+      });
+  extension.Register(function);
 }
 
 } // namespace duckdb
