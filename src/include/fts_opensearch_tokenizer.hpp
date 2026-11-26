@@ -1,7 +1,7 @@
 #pragma once
 
+#include "fts_common.hpp"
 #include "fts_unicode_classifier.hpp"
-#include "utf8proc_wrapper.hpp"
 
 namespace duckdb {
 

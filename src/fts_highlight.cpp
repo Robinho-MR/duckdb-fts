@@ -1,9 +1,7 @@
 #include "fts_highlight.hpp"
 
-#include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/common/vector/list_vector.hpp"
-#include "duckdb/common/vector/string_vector.hpp"
-#include "duckdb/common/vector/vector_writer.hpp"
+#include "fts_vector.hpp"
+
 
 #include <algorithm>
 
@@ -36,44 +34,50 @@ static void MergeSpans(vector<HighlightSpan> &spans) {
 
 } // namespace
 
-static void RenderHighlightFunction(DataChunk &args, ExpressionState &state,
-                                    Vector &result) {
-  auto texts = args.data[0].Values<string_t>();
-  auto start_lists = args.data[1].Values<VectorListType<uint32_t>>();
-  auto end_lists = args.data[2].Values<VectorListType<uint32_t>>();
-  auto befores = args.data[3].Values<string_t>();
-  auto afters = args.data[4].Values<string_t>();
-  auto window_froms = args.data[5].Values<uint32_t>();
-  auto window_tos = args.data[6].Values<uint32_t>();
-  auto leadings = args.data[7].Values<bool>();
-  auto trailings = args.data[8].Values<bool>();
-  auto ellipses = args.data[9].Values<string_t>();
+static void RenderHighlightFunction(cxx::ScalarFunction::ExecInput &input) {
+  auto count = input.GetRowCount();
+  FTSInput<cxx::varchar_t> texts(input.GetArg(0));
+  FTSListInput<uint32_t> start_lists(input.GetArg(1));
+  FTSListInput<uint32_t> end_lists(input.GetArg(2));
+  FTSInput<cxx::varchar_t> befores(input.GetArg(3));
+  FTSInput<cxx::varchar_t> afters(input.GetArg(4));
+  FTSInput<uint32_t> window_froms(input.GetArg(5));
+  FTSInput<uint32_t> window_tos(input.GetArg(6));
+  FTSInput<bool> leadings(input.GetArg(7));
+  FTSInput<bool> trailings(input.GetArg(8));
+  FTSInput<cxx::varchar_t> ellipses(input.GetArg(9));
 
-  auto writer = FlatVector::Writer<string_t>(result, args.size());
-  for (idx_t i = 0; i < args.size(); i++) {
-    if (!texts[i].IsValid() || !start_lists[i].IsValid() ||
-        !end_lists[i].IsValid() || !befores[i].IsValid() ||
-        !afters[i].IsValid() || !window_froms[i].IsValid() ||
-        !window_tos[i].IsValid() || !leadings[i].IsValid() ||
-        !trailings[i].IsValid() || !ellipses[i].IsValid()) {
-      writer.WriteNull();
+  auto result = input.GetResult();
+  result.SetSize(count);
+  FTSNulls nulls(result, count);
+  for (idx_t i = 0; i < count; i++) {
+    if (!texts.IsValid(i) || !start_lists.IsValid(i) ||
+        !end_lists.IsValid(i) || !befores.IsValid(i) || !afters.IsValid(i) ||
+        !window_froms.IsValid(i) || !window_tos.IsValid(i) ||
+        !leadings.IsValid(i) || !trailings.IsValid(i) ||
+        !ellipses.IsValid(i)) {
+      nulls.SetNull(i);
       continue;
     }
-    auto text = texts[i].GetValue();
-    auto window_from = window_froms[i].GetValue();
-    auto window_to = MinValue(window_tos[i].GetValue(),
-                              UnsafeNumericCast<uint32_t>(text.GetSize()));
+    auto text = texts.Get(i);
+    auto window_from = window_froms.Get(i);
+    auto window_to =
+        MinValue(window_tos.Get(i), UnsafeNumericCast<uint32_t>(text.size()));
     window_from = MinValue(window_from, window_to);
 
     vector<uint32_t> span_starts;
     vector<uint32_t> span_ends;
-    span_starts.reserve(start_lists[i].GetListLength());
-    span_ends.reserve(end_lists[i].GetListLength());
-    for (const auto value : start_lists[i].GetChildValues()) {
-      span_starts.push_back(value.IsValid() ? value.GetValue() : window_to);
+    span_starts.reserve(start_lists.Length(i));
+    span_ends.reserve(end_lists.Length(i));
+    for (idx_t j = 0; j < start_lists.Length(i); j++) {
+      span_starts.push_back(start_lists.ElementIsValid(i, j)
+                                ? start_lists.Element(i, j)
+                                : window_to);
     }
-    for (const auto value : end_lists[i].GetChildValues()) {
-      span_ends.push_back(value.IsValid() ? value.GetValue() : window_from);
+    for (idx_t j = 0; j < end_lists.Length(i); j++) {
+      span_ends.push_back(end_lists.ElementIsValid(i, j)
+                              ? end_lists.Element(i, j)
+                              : window_from);
     }
     vector<HighlightSpan> spans;
     auto span_count = MinValue<idx_t>(span_starts.size(), span_ends.size());
@@ -86,37 +90,58 @@ static void RenderHighlightFunction(DataChunk &args, ExpressionState &state,
     }
     MergeSpans(spans);
 
-    auto data = text.GetData();
+    auto data = text.data();
+    auto before = string(befores.Get(i).view());
+    auto after = string(afters.Get(i).view());
+    auto ellipsis = string(ellipses.Get(i).view());
     string rendered;
-    if (leadings[i].GetValue()) {
-      rendered += ellipses[i].GetValue().GetString();
+    if (leadings.Get(i)) {
+      rendered += ellipsis;
     }
     auto cursor = window_from;
     for (auto &span : spans) {
       rendered.append(data + cursor, span.start - cursor);
-      rendered += befores[i].GetValue().GetString();
+      rendered += before;
       rendered.append(data + span.start, span.end - span.start);
-      rendered += afters[i].GetValue().GetString();
+      rendered += after;
       cursor = span.end;
     }
     rendered.append(data + cursor, window_to - cursor);
-    if (trailings[i].GetValue()) {
-      rendered += ellipses[i].GetValue().GetString();
+    if (trailings.Get(i)) {
+      rendered += ellipsis;
     }
-    writer.WriteValue(rendered);
+    // cutting the text can split a character: functions that decode check
+    result.AssignStringUnsafe(i, rendered);
   }
 }
 
-ScalarFunction GetFTSRenderHighlightFunction() {
-  ScalarFunction function(
-      "fts_render_highlight",
-      {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UINTEGER),
-       LogicalType::LIST(LogicalType::UINTEGER), LogicalType::VARCHAR,
-       LogicalType::VARCHAR, LogicalType::UINTEGER, LogicalType::UINTEGER,
-       LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::VARCHAR},
-      LogicalType::VARCHAR, RenderHighlightFunction);
-  function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-  return function;
+void RegisterFTSRenderHighlight(cxx::Extension &extension,
+                                cxx::Factory &factory) {
+  auto function = cxx::ScalarFunction::Create(factory);
+  function.SetName("fts_render_highlight")
+      .SetExecCallback(RenderHighlightFunction)
+      .SetNullHandling(cxx::FunctionNullHandling::SPECIAL)
+      .SetFallibility(cxx::FunctionFallibility::INFALLIBLE)
+      .WithSignature([&](cxx::FunctionSignature &signature) {
+        using cxx::FunctionParameterKind;
+        auto varchar = factory.ParseType("VARCHAR");
+        auto uinteger = factory.ParseType("UINTEGER");
+        auto boolean = factory.ParseType("BOOLEAN");
+        auto uinteger_list = factory.ParseType("UINTEGER[]");
+        auto positional = FunctionParameterKind::POSITIONAL_ONLY;
+        signature.AddParameter("text", varchar, positional)
+            .AddParameter("starts", uinteger_list, positional)
+            .AddParameter("ends", uinteger_list, positional)
+            .AddParameter("before", varchar, positional)
+            .AddParameter("after", varchar, positional)
+            .AddParameter("window_from", uinteger, positional)
+            .AddParameter("window_to", uinteger, positional)
+            .AddParameter("leading", boolean, positional)
+            .AddParameter("trailing", boolean, positional)
+            .AddParameter("ellipsis", varchar, positional)
+            .SetReturnType(varchar);
+      });
+  extension.Register(function);
 }
 
 } // namespace duckdb

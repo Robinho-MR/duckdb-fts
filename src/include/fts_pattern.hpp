@@ -1,9 +1,10 @@
 #pragma once
 
-#include "duckdb/function/scalar_function.hpp"
+#include "fts_common.hpp"
 
 namespace duckdb {
 
-ScalarFunction GetFTSAnalyzePatternFunction();
+void RegisterFTSAnalyzePattern(cxx::Extension &extension,
+                               cxx::Factory &factory);
 
 } // namespace duckdb

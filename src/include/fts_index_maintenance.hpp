@@ -1,9 +1,9 @@
 #pragma once
 
+#include "fts_common.hpp"
+
 #include "fts_index_common.hpp"
 
-#include "duckdb/common/common.hpp"
-#include "duckdb/parser/qualified_name.hpp"
 
 namespace duckdb {
 
@@ -15,8 +15,8 @@ struct FTSIndexMaintenanceConfig {
 
 class FTSIndexMaintenance {
 public:
-  static string DropTriggers(const QualifiedName &qname);
-  static string Create(const QualifiedName &qname, const string &input_id,
+  static string DropTriggers(const FTSTableName &qname);
+  static string Create(const FTSTableName &qname, const string &input_id,
                        const vector<string> &input_values,
                        const FTSIndexMaintenanceConfig &config);
 };

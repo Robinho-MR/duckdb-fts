@@ -1,20 +1,21 @@
 #include "fts_tokenizer.hpp"
 
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/common/vector/list_vector.hpp"
-#include "duckdb/common/vector/string_vector.hpp"
-#include "duckdb/common/vector/struct_vector.hpp"
-#include "duckdb/common/vector/vector_writer.hpp"
-#include "duckdb/execution/expression_executor_state.hpp"
+#include "fts_vector.hpp"
+
 #include "fts_opensearch_tokenizer.hpp"
 #include "re2/re2.h"
 #include "utf8proc.hpp"
-#include "utf8proc_wrapper.hpp"
 
+#include <cassert>
+#include <deque>
+#include <memory>
 #include <type_traits>
 
 namespace duckdb {
+
+int32_t Utf8Proc::CodepointToLower(int32_t codepoint) {
+  return utf8proc_tolower(codepoint);
+}
 
 namespace {
 
@@ -53,7 +54,7 @@ static NormalizedText NormalizeWithMap(const char *data, idx_t size,
     result.text.assign(data, size);
     if (lower) {
       for (auto &c : result.text) {
-        c = StringUtil::CharacterToLower(c);
+        c = ToLowerASCII(c);
       }
     }
     if (WITH_OFFSETS && size > 0) {
@@ -114,7 +115,7 @@ static NormalizedText NormalizeWithMap(const char *data, idx_t size,
     if (strip_accents) {
       // STRIPMARK removes every nonzero combining class, so no canonical
       // reordering remains. Let utf8proc compose adjacent starters.
-      D_ASSERT(utf8proc_get_property(codepoint)->combining_class == 0);
+      assert(utf8proc_get_property(codepoint)->combining_class == 0);
       if (pending >= 0 && codepoint >= 128) {
         int32_t pair[] = {pending, codepoint};
         if (utf8proc_normalize_utf32(pair, 2, options) == 1) {
@@ -151,7 +152,7 @@ static NormalizedText NormalizeWithMap(const char *data, idx_t size,
     auto count =
         utf8proc_decompose_char(codepoint, buffer, 4, options, nullptr);
     if (count < 0) {
-      throw InvalidInputException(utf8proc_errmsg(count));
+      throw InvalidInputException(string(utf8proc_errmsg(count)));
     }
     if (count == 0) {
       // A removed mark still belongs to the original span of its base.
@@ -195,14 +196,14 @@ static bool IsUtf8CharacterStart(char c) { return (c & 0xC0) != 0x80; }
 
 struct CachedRegex {
   string delimiter;
-  unique_ptr<duckdb_re2::RE2> regex;
+  std::unique_ptr<duckdb_re2::RE2> regex;
 
   duckdb_re2::RE2 &Get(const string &pattern) {
     if (!regex || delimiter != pattern) {
       duckdb_re2::StringPiece pattern_piece(pattern);
-      auto compiled = make_uniq<duckdb_re2::RE2>(pattern_piece);
+      auto compiled = std::make_unique<duckdb_re2::RE2>(pattern_piece);
       if (!compiled->ok()) {
-        throw InvalidInputException(compiled->error());
+        throw InvalidInputException(string(compiled->error()));
       }
       delimiter = pattern;
       regex = std::move(compiled);
@@ -211,15 +212,9 @@ struct CachedRegex {
   }
 };
 
-struct TokenizeLocalState : public FunctionLocalState {
+struct TokenizeLocalState {
   CachedRegex regex;
 };
-
-static unique_ptr<FunctionLocalState>
-InitTokenizeState(ExpressionState &, const BoundFunctionExpression &,
-                  FunctionData *) {
-  return make_uniq<TokenizeLocalState>();
-}
 
 // Mirrors StringSplitter::Split in DuckDB's string_split.cpp, spans included.
 template <class EMIT>
@@ -284,7 +279,7 @@ static MappedToken MapSpan(const NormalizedText &normalized, TokenSpan span) {
   }
   auto first = PieceContaining(normalized, span.norm_start);
   auto last = PieceContaining(normalized, span.norm_start + span.norm_size - 1);
-  D_ASSERT(first && last);
+  assert(first && last);
   token.orig_start = MapWithinPiece(*first, span.norm_start);
   token.orig_end = last->norm_size == last->orig_size
                        ? last->orig_start + (span.norm_start + span.norm_size -
@@ -293,103 +288,131 @@ static MappedToken MapSpan(const NormalizedText &normalized, TokenSpan span) {
   return token;
 }
 
-static void WriteToken(VectorWriter<string_t> &writer, string_t text,
-                       const NormalizedText &, TokenSpan span) {
-  writer.WriteStringRef(
-      string_t(text.GetData() + span.norm_start, span.norm_size));
-}
-
-using SpanToken = VectorStructType<string_t, uint32_t, uint32_t>;
-
-static void WriteToken(VectorWriter<SpanToken> &writer, string_t text,
-                       const NormalizedText &normalized, TokenSpan span) {
-  auto mapped = MapSpan(normalized, span);
-  writer.WriteValue([&](VectorWriter<string_t> &term,
-                        VectorWriter<uint32_t> &start,
-                        VectorWriter<uint32_t> &end) {
-    term.WriteStringRef(
-        string_t(text.GetData() + span.norm_start, span.norm_size));
-    start.WriteValue(mapped.orig_start);
-    end.WriteValue(mapped.orig_end);
-  });
-}
+//! The tokens of the rows of a chunk, which all point into `texts`
+struct TokenizedRows {
+  std::deque<string> texts;
+  vector<TokenSpan> spans;
+  vector<MappedToken> mapped;
+  vector<const string *> owners;
+};
 
 } // namespace
 
 template <bool WITH_OFFSETS>
-static void TokenizeFunction(DataChunk &args, ExpressionState &state,
-                             Vector &result) {
-  auto inputs = args.data[0].Values<string_t>();
-  auto tokenizers = args.data[1].Values<string_t>();
-  auto ignores = args.data[2].Values<string_t>();
-  auto strip_flags = args.data[3].Values<bool>();
-  auto lower_flags = args.data[4].Values<bool>();
+static void TokenizeFunction(cxx::ScalarFunction::ExecInput &input) {
+  auto count = input.GetRowCount();
+  FTSInput<cxx::varchar_t> inputs(input.GetArg(0));
+  FTSInput<cxx::varchar_t> tokenizers(input.GetArg(1));
+  FTSInput<cxx::varchar_t> ignores(input.GetArg(2));
+  FTSInput<bool> strip_flags(input.GetArg(3));
+  FTSInput<bool> lower_flags(input.GetArg(4));
 
-  result.SetVectorType(VectorType::FLAT_VECTOR);
-  ListVector::SetListSize(result, 0);
-  using TokenType =
-      typename std::conditional<WITH_OFFSETS, SpanToken, string_t>::type;
-  auto list_writer =
-      FlatVector::Writer<VectorListType<TokenType>>(result, args.size());
-
-  auto &cached_regex = ExecuteFunctionState::GetFunctionState(state)
-                           ->Cast<TokenizeLocalState>()
-                           .regex;
-  for (idx_t i = 0; i < args.size(); i++) {
-    auto input = inputs[i];
-    if (!input.IsValid() || !tokenizers[i].IsValid() || !ignores[i].IsValid() ||
-        !strip_flags[i].IsValid() || !lower_flags[i].IsValid()) {
-      list_writer.WriteNull();
+  auto &cached_regex = input.GetInitData<TokenizeLocalState>().regex;
+  TokenizedRows rows;
+  struct ListEntry {
+    idx_t offset = 0;
+    idx_t length = 0;
+  };
+  vector<ListEntry> entries(count);
+  vector<bool> is_null(count, false);
+  for (idx_t i = 0; i < count; i++) {
+    entries[i].offset = rows.spans.size();
+    if (!inputs.IsValid(i) || !tokenizers.IsValid(i) || !ignores.IsValid(i) ||
+        !strip_flags.IsValid(i) || !lower_flags.IsValid(i)) {
+      is_null[i] = true;
       continue;
     }
-    auto input_value = input.GetValue();
+    auto input_value = inputs.Get(i);
+    // One owned copy of the normalized text; tokens reference its substrings
+    rows.texts.emplace_back();
     auto normalized = NormalizeWithMap<WITH_OFFSETS>(
-        input_value.GetData(), input_value.GetSize(), strip_flags[i].GetValue(),
-        lower_flags[i].GetValue());
-
-    auto &child = ListVector::GetChildMutable(result);
-    auto &raw_vector =
-        WITH_OFFSETS ? StructVector::GetEntries(child)[0] : child;
-    // One owned copy of normalized text; tokens reference its substrings.
-    auto owned_text = StringVector::AddString(raw_vector, normalized.text);
-    auto list = list_writer.WriteDynamicList();
+        input_value.data(), input_value.size(), strip_flags.Get(i),
+        lower_flags.Get(i));
+    rows.texts.back() = normalized.text;
+    auto owner = &rows.texts.back();
     auto emit = [&](idx_t start, idx_t size) {
       TokenSpan span{UnsafeNumericCast<uint32_t>(start),
                      UnsafeNumericCast<uint32_t>(size)};
-      WriteToken(list.WriteElement(), owned_text, normalized, span);
+      rows.spans.push_back(span);
+      rows.owners.push_back(owner);
+      if (WITH_OFFSETS) {
+        rows.mapped.push_back(MapSpan(normalized, span));
+      }
     };
-    if (tokenizers[i].GetValue().GetString() == "opensearch_standard") {
+    if (string(tokenizers.Get(i).view()) == "opensearch_standard") {
       ScanOpenSearchStandardTokens(normalized.text.data(),
                                    normalized.text.size(), emit);
     } else {
-      auto delimiter = "(" + ignores[i].GetValue().GetString() + ")|\\s+";
+      auto delimiter = "(" + string(ignores.Get(i).view()) + ")|\\s+";
       SplitRegexWithSpans(normalized.text, cached_regex.Get(delimiter), emit);
     }
+    entries[i].length = rows.spans.size() - entries[i].offset;
+  }
+
+  auto result = input.GetResult();
+  result.SetSize(count);
+  auto result_entries = result.GetDataMutable<cxx::list_entry_t>();
+  FTSNulls nulls(result, count);
+  for (idx_t i = 0; i < count; i++) {
+    result_entries[i] = {entries[i].offset, entries[i].length};
+    if (is_null[i]) {
+      nulls.SetNull(i);
+    }
+  }
+  auto child = result.GetChild(0);
+  child.SetSize(rows.spans.size());
+  child.GetValidityMutable().SetAllValid(rows.spans.size());
+  if (WITH_OFFSETS) {
+    auto start_column = child.GetChild(1);
+    auto end_column = child.GetChild(2);
+    start_column.GetValidityMutable().SetAllValid(rows.spans.size());
+    end_column.GetValidityMutable().SetAllValid(rows.spans.size());
+    auto start_offsets = start_column.template GetDataMutable<uint32_t>();
+    auto end_offsets = end_column.template GetDataMutable<uint32_t>();
+    for (idx_t j = 0; j < rows.spans.size(); j++) {
+      start_offsets[j] = rows.mapped[j].orig_start;
+      end_offsets[j] = rows.mapped[j].orig_end;
+    }
+    child.GetChild(0).GetValidityMutable().SetAllValid(rows.spans.size());
+  }
+  auto raw_terms = WITH_OFFSETS ? child.GetChild(0) : result.GetChild(0);
+  for (idx_t j = 0; j < rows.spans.size(); j++) {
+    raw_terms.AssignStringUnsafe(
+        j, std::string_view(rows.owners[j]->data() + rows.spans[j].norm_start,
+                            rows.spans[j].norm_size));
   }
 }
 
-template <bool WITH_OFFSETS> static ScalarFunction GetTokenizeFunction() {
-  auto element_type =
-      WITH_OFFSETS
-          ? LogicalType::STRUCT({{"raw_term", LogicalType::VARCHAR},
-                                 {"start_offset", LogicalType::UINTEGER},
-                                 {"end_offset", LogicalType::UINTEGER}})
-          : LogicalType::VARCHAR;
-  ScalarFunction function(
-      WITH_OFFSETS ? "fts_tokenize_spans" : "fts_tokenize",
-      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-       LogicalType::BOOLEAN, LogicalType::BOOLEAN},
-      LogicalType::LIST(element_type), TokenizeFunction<WITH_OFFSETS>);
-  function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-  function.SetInitStateCallback(InitTokenizeState);
-  function.SetFallible();
-  return function;
+template <bool WITH_OFFSETS>
+static void RegisterTokenize(cxx::Extension &extension, cxx::Factory &factory) {
+  auto function = cxx::ScalarFunction::Create(factory);
+  function.SetName(WITH_OFFSETS ? "fts_tokenize_spans" : "fts_tokenize")
+      .SetExecCallback(TokenizeFunction<WITH_OFFSETS>)
+      .SetInitCallback([](cxx::ScalarFunction::InitInput &input) {
+        input.SetInitData<TokenizeLocalState>();
+      })
+      .SetNullHandling(cxx::FunctionNullHandling::SPECIAL)
+      .WithSignature([&](cxx::FunctionSignature &signature) {
+        auto varchar = factory.ParseType("VARCHAR");
+        auto boolean = factory.ParseType("BOOLEAN");
+        auto positional = cxx::FunctionParameterKind::POSITIONAL_ONLY;
+        signature.AddParameter("input", varchar, positional)
+            .AddParameter("tokenizer", varchar, positional)
+            .AddParameter("ignore", varchar, positional)
+            .AddParameter("strip_accents", boolean, positional)
+            .AddParameter("lower", boolean, positional)
+            .SetReturnType(factory.ParseType(
+                WITH_OFFSETS
+                    ? "STRUCT(raw_term VARCHAR, start_offset UINTEGER, "
+                      "end_offset UINTEGER)[]"
+                    : "VARCHAR[]"));
+      });
+  extension.Register(function);
 }
 
-ScalarFunction GetFTSTokenizeFunction() { return GetTokenizeFunction<false>(); }
-
-ScalarFunction GetFTSTokenizeSpansFunction() {
-  return GetTokenizeFunction<true>();
+void RegisterFTSTokenize(cxx::Extension &extension, cxx::Factory &factory) {
+  RegisterTokenize<false>(extension, factory);
+  RegisterTokenize<true>(extension, factory);
 }
 
 } // namespace duckdb
